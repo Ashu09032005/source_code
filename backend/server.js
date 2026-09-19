@@ -5,9 +5,11 @@ const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
 const { analyzeProject } = require('./src/analyzer');
+const { enrichFindingsWithAi } = require('./src/aiService');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+app.locals.lastReport = null;
+const PORT = process.env.PORT || 5000;
 const backendDir = __dirname;
 const frontendDir = path.join(backendDir, '..', 'frontend');
 const uploadDir = path.join(backendDir, 'uploads');
@@ -42,24 +44,39 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static(frontendDir));
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Vulnerability analyzer is running.' });
+  res.json({ status: 'ok', message: 'Explainable source-code security pipeline is running.' });
 });
 
-app.get('/api/demo', (req, res) => {
+function buildReport(projectName, source, result, findings) {
+  return {
+    projectName,
+    source,
+    generatedAt: new Date().toISOString(),
+    summary: result.summary,
+    findings,
+    pipeline: result.pipeline,
+    aiSummary: {
+      overview: 'The static analysis pipeline detects suspicious flows, and the AI layer explains the likely root cause and safe fix.',
+      enabled: !!process.env.OPENAI_API_KEY,
+      model: process.env.OPENAI_API_KEY ? 'OpenAI GPT-4o mini' : 'Fallback reasoning engine'
+    }
+  };
+}
+
+app.get('/api/demo', async (req, res) => {
   try {
     const result = analyzeProject(sampleProjectDir);
-    res.json({
-      projectName: 'Demo vulnerable application',
-      source: 'sample-project',
-      ...result
-    });
+    const findings = await enrichFindingsWithAi(result.findings || []);
+    const report = buildReport('Demo vulnerable application', 'sample-project', result, findings);
+    app.locals.lastReport = report;
+    res.json(report);
   } catch (error) {
     console.error('Demo analysis failed:', error);
     res.status(500).json({ error: 'Unable to analyze the demo project.' });
   }
 });
 
-app.post('/api/upload', upload.single('project'), (req, res) => {
+app.post('/api/upload', upload.single('project'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No ZIP file uploaded.' });
@@ -73,16 +90,34 @@ app.post('/api/upload', upload.single('project'), (req, res) => {
     zip.extractAllTo(extractDir, true);
 
     const result = analyzeProject(extractDir);
+    const findings = await enrichFindingsWithAi(result.findings || []);
+    const report = buildReport(req.file.originalname.replace(/\.zip$/i, ''), 'uploaded-zip', result, findings);
+    app.locals.lastReport = report;
 
-    res.json({
-      projectName: req.file.originalname.replace(/\.zip$/i, ''),
-      source: 'uploaded-zip',
-      ...result
-    });
+    res.json(report);
   } catch (error) {
     console.error('Upload analysis failed:', error);
     res.status(500).json({ error: 'Failed to analyze the uploaded project.' });
   }
+});
+
+app.get('/api/report', (req, res) => {
+  if (!app.locals.lastReport) {
+    return res.status(404).json({ error: 'No report has been generated yet.' });
+  }
+
+  res.json(app.locals.lastReport);
+});
+
+app.get('/api/report/download', (req, res) => {
+  if (!app.locals.lastReport) {
+    return res.status(404).json({ error: 'No report has been generated yet.' });
+  }
+
+  const fileName = `${(app.locals.lastReport.projectName || 'security-report').replace(/\s+/g, '-').toLowerCase()}.json`;
+  res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+  res.setHeader('Content-Type', 'application/json');
+  res.send(JSON.stringify(app.locals.lastReport, null, 2));
 });
 
 app.get('*', (req, res) => {
@@ -102,5 +137,5 @@ app.use((error, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Explainable Vulnerability Analyzer running on http://localhost:${PORT}`);
+  console.log(`Explainable Source-Code Security Pipeline running on http://localhost:${PORT}`);
 });

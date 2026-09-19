@@ -116,6 +116,29 @@ button:hover,
   padding: 22px;
 }
 
+.pipeline-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.stage-card {
+  background: rgba(15, 25, 42, 0.9);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px 10px;
+  text-align: center;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.stage-card.active {
+  background: rgba(91, 192, 235, 0.09);
+  color: #dfeeff;
+  border-color: rgba(91, 192, 235, 0.6);
+}
+
 .summary-cards {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
@@ -245,6 +268,43 @@ button:hover,
   margin: 0;
   color: #dfe9ff;
   line-height: 1.6;
+}
+
+.report-panel {
+  margin-bottom: 20px;
+}
+
+.report-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.report-item {
+  background: rgba(9, 15, 27, 0.65);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.report-item h4 {
+  margin: 0 0 8px;
+  font-size: 0.82rem;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.report-item p,
+.report-item ul {
+  margin: 0;
+  line-height: 1.6;
+  color: #ebf3ff;
+}
+
+.report-item ul {
+  padding-left: 18px;
 }
 
 .detail-grid {

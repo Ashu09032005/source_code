@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
+const parser = require('@babel/parser');
+const traverse = require('@babel/traverse').default;
 
-const SUPPORTED_EXTENSIONS = new Set([
-  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs'
-]);
+const SUPPORTED_EXTENSIONS = new Set(['.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs']);
 
 const severityOrder = {
   critical: 5,
@@ -13,25 +13,25 @@ const severityOrder = {
   info: 1
 };
 
+const SOURCE_IDENTIFIERS = new Set(['req.body', 'req.query', 'req.params', 'req.headers', 'process.env', 'process.argv']);
+const SINK_TYPES = {
+  SQLInjection: { severity: 'high', confidence: 'high' },
+  XSS: { severity: 'high', confidence: 'medium' },
+  CommandInjection: { severity: 'critical', confidence: 'high' },
+  PathTraversal: { severity: 'high', confidence: 'medium' },
+  HardcodedSecret: { severity: 'medium', confidence: 'high' }
+};
+
 function listFilesRecursively(dir) {
   let files = [];
-
-  if (!fs.existsSync(dir)) {
-    return files;
-  }
+  if (!fs.existsSync(dir)) return files;
 
   const entries = fs.readdirSync(dir, { withFileTypes: true });
-
   for (const entry of entries) {
     const entryPath = path.join(dir, entry.name);
-
-    if (entry.isDirectory()) {
-      files = files.concat(listFilesRecursively(entryPath));
-    } else if (entry.isFile()) {
-      files.push(entryPath);
-    }
+    if (entry.isDirectory()) files = files.concat(listFilesRecursively(entryPath));
+    else if (entry.isFile()) files.push(entryPath);
   }
-
   return files;
 }
 
@@ -44,19 +44,7 @@ function extractSnippet(content, lineNumber) {
   return lines[Math.max(0, lineNumber - 1)] || '';
 }
 
-function buildFinding({
-  type,
-  severity,
-  confidence,
-  file,
-  line,
-  snippet,
-  source,
-  sink,
-  impact,
-  fix,
-  description
-}) {
+function buildFinding({ type, severity, confidence, file, line, snippet, source, sink, impact, fix, description, dataFlow }) {
   return {
     id: `${type.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
     type,
@@ -69,234 +57,204 @@ function buildFinding({
     sink,
     impact,
     fix,
-    description
+    description,
+    dataFlow
   };
 }
 
-function detectSqlInjection(filePath, content) {
+function toExpressionText(node) {
+  if (!node) return '';
+  if (node.type === 'Identifier') return node.name;
+  if (node.type === 'StringLiteral' || node.type === 'Literal') return String(node.value);
+  if (node.type === 'MemberExpression') {
+    const objectText = toExpressionText(node.object);
+    const propertyText = toExpressionText(node.property);
+    return objectText && propertyText ? `${objectText}.${propertyText}` : objectText || propertyText || '';
+  }
+  if (node.type === 'BinaryExpression') {
+    return `${toExpressionText(node.left)} ${node.operator} ${toExpressionText(node.right)}`;
+  }
+  if (node.type === 'CallExpression') {
+    return `${toExpressionText(node.callee)}()`;
+  }
+  return '';
+}
+
+function expressionContainsTainted(expr, taintedVars) {
+  if (!expr) return false;
+  if (expr.type === 'Identifier') return taintedVars.has(expr.name);
+  if (expr.type === 'MemberExpression') {
+    const text = toExpressionText(expr);
+    return [...taintedVars.keys()].some(key => text.includes(key));
+  }
+  if (expr.type === 'BinaryExpression') {
+    return expressionContainsTainted(expr.left, taintedVars) || expressionContainsTainted(expr.right, taintedVars);
+  }
+  if (expr.type === 'LogicalExpression') {
+    return expressionContainsTainted(expr.left, taintedVars) || expressionContainsTainted(expr.right, taintedVars);
+  }
+  if (expr.type === 'CallExpression') {
+    return expr.arguments.some(arg => expressionContainsTainted(arg, taintedVars));
+  }
+  return false;
+}
+
+function isDirectSource(node) {
+  if (!node) return false;
+  const exprText = toExpressionText(node);
+  return SOURCE_IDENTIFIERS.has(exprText) || /req\.(body|query|params|headers)/.test(exprText) || /process\.(env|argv)/.test(exprText);
+}
+
+function getCallName(node) {
+  if (!node || !node.callee) return '';
+  if (node.callee.type === 'Identifier') return node.callee.name;
+  if (node.callee.type === 'MemberExpression') return toExpressionText(node.callee);
+  return '';
+}
+
+function getLineInfo(content, loc) {
+  if (!loc) return { line: 1, snippet: '' };
+  const line = loc.start.line;
+  const snippet = extractSnippet(content, line);
+  return { line, snippet };
+}
+
+function createAiExplanation(type, source, sink, flow) {
+  return `The application receives untrusted value from ${source}, passes it through ${flow.join(' → ') || 'the data flow'}, and eventually reaches ${sink}. This creates a ${type.toLowerCase()} issue because user-controlled information is reaching a sensitive operation without validation or sanitization.`;
+}
+
+function analyzeFile(filePath, content) {
   const findings = [];
-  const patterns = [
-    {
-      pattern: /(SELECT|INSERT|UPDATE|DELETE|CREATE).*?(?:\+|\$\{).+/gi,
-      source: 'User-controlled request data or application variables',
-      sink: 'Database query execution',
-      impact: 'Attackers can manipulate SQL queries to read, modify or delete database records.',
-      fix: 'Use parameterized queries or ORM prepared statements instead of concatenating user data.',
-      description: 'A SQL statement is being assembled from dynamic input.'
+  const sources = [];
+  const sinks = [];
+  const dataFlow = [];
+
+  let ast;
+  try {
+    ast = parser.parse(content, {
+      sourceType: 'unambiguous',
+      plugins: ['jsx', 'typescript', 'classProperties']
+    });
+  } catch (error) {
+    return { findings, sources, sinks, dataFlow };
+  }
+
+  const taintedVars = new Map();
+
+  traverse(ast, {
+    VariableDeclarator(path) {
+      const id = path.node.id;
+      const init = path.node.init;
+      if (!id || id.type !== 'Identifier') return;
+
+      if (isDirectSource(init)) {
+        taintedVars.set(id.name, toExpressionText(init));
+        sources.push({ variable: id.name, source: toExpressionText(init), file: filePath });
+      } else if (init && expressionContainsTainted(init, taintedVars)) {
+        taintedVars.set(id.name, toExpressionText(init));
+        dataFlow.push({ variable: id.name, from: toExpressionText(init), file: filePath });
+      }
     },
-    {
-      pattern: /(?:db|connection)\.(?:query|execute|raw)\s*\(\s*["'`].*?(?:\+|\$\{)/gi,
-      source: 'Client request fields or app variables',
-      sink: 'query() / execute() call',
-      impact: 'Untrusted input reaches the database layer without validation, making injection possible.',
-      fix: 'Bind user input as parameters and avoid string interpolation in SQL statements.',
-      description: 'Dynamic values reach the database query call directly.'
-    }
-  ];
 
-  for (const rule of patterns) {
-    const regex = new RegExp(rule.pattern);
-    let match;
-
-    while ((match = regex.exec(content)) !== null) {
-      const line = getLineNumber(content, match.index);
-      findings.push(buildFinding({
-        type: 'SQL Injection',
-        severity: 'high',
-        confidence: 'high',
-        file: filePath,
-        line,
-        snippet: extractSnippet(content, line),
-        source: rule.source,
-        sink: rule.sink,
-        impact: rule.impact,
-        fix: rule.fix,
-        description: rule.description
-      }));
-    }
-  }
-
-  return findings;
-}
-
-function detectXss(filePath, content) {
-  const findings = [];
-  const patterns = [
-    {
-      pattern: /(?:innerHTML|outerHTML|insertAdjacentHTML)\s*=?\s*.*?(?:req\.(body|query|params)|document\.getElementById|window\.location|\w+)/gi,
-      source: 'Request data or DOM value',
-      sink: 'HTML injection into the browser',
-      impact: 'The application can render attacker-controlled HTML or script content.',
-      fix: 'Use textContent or a safe template engine and sanitize untrusted content before rendering.',
-      description: 'Data from the request or DOM is inserted into HTML content without escaping.'
+    AssignmentExpression(path) {
+      const left = path.node.left;
+      const right = path.node.right;
+      if (!left || left.type !== 'Identifier') return;
+      if (isDirectSource(right) || expressionContainsTainted(right, taintedVars)) {
+        taintedVars.set(left.name, toExpressionText(right));
+        dataFlow.push({ variable: left.name, from: toExpressionText(right), file: filePath });
+      }
     },
-    {
-      pattern: /res\.(?:send|write)\s*\(\s*.*?(?:\+|\$\{|\w+)/gi,
-      source: 'User input or derived response value',
-      sink: 'HTTP response rendering',
-      impact: 'The response may contain untrusted script or HTML that is executed by the browser.',
-      fix: 'Sanitize output and escape HTML before returning it in responses.',
-      description: 'Dynamic values are returned directly in the HTTP response.'
-    }
-  ];
 
-  for (const rule of patterns) {
-    const regex = new RegExp(rule.pattern);
-    let match;
+    CallExpression(path) {
+      const callName = getCallName(path.node);
+      const args = path.node.arguments || [];
 
-    while ((match = regex.exec(content)) !== null) {
-      const line = getLineNumber(content, match.index);
+      if (!callName) return;
+
+      const sinkMatch = {
+        'db.query': { type: 'SQL Injection', rule: 'query injection' },
+        'db.execute': { type: 'SQL Injection', rule: 'query injection' },
+        'exec': { type: 'Command Injection', rule: 'command execution' },
+        'execSync': { type: 'Command Injection', rule: 'command execution' },
+        'spawn': { type: 'Command Injection', rule: 'command execution' },
+        'readFileSync': { type: 'Path Traversal', rule: 'file access' },
+        'readFile': { type: 'Path Traversal', rule: 'file access' },
+        'writeFile': { type: 'Path Traversal', rule: 'file access' },
+        'innerHTML': { type: 'XSS', rule: 'html rendering' },
+        'res.send': { type: 'XSS', rule: 'response rendering' },
+        'res.write': { type: 'XSS', rule: 'response rendering' }
+      };
+
+      const matched = sinkMatch[callName] || Object.entries(sinkMatch).find(([patternKey]) => callName.includes(patternKey));
+      const sinkRule = matched ? matched[1] || matched : null;
+      if (!sinkRule) return;
+
+      const taintedArg = args.find(arg => expressionContainsTainted(arg, taintedVars) || isDirectSource(arg));
+      if (!taintedArg) return;
+
+      const sourceValue = toExpressionText(taintedArg);
+      const flow = [sourceValue];
+      const variableName = sourceValue.split(/[.\[]/).pop() || sourceValue;
+      if (variableName && variableName !== sourceValue) flow.push(variableName);
+      flow.push(callName);
+
+      const { line, snippet } = getLineInfo(content, path.node.loc);
+      const sinkType = sinkRule.type;
+      const meta = SINK_TYPES[sinkType] || { severity: 'medium', confidence: 'medium' };
+
+      sinks.push({ file: filePath, sink: callName, type: sinkType, line });
       findings.push(buildFinding({
-        type: 'Cross-Site Scripting (XSS)',
-        severity: 'high',
-        confidence: 'medium',
+        type: sinkType,
+        severity: meta.severity,
+        confidence: meta.confidence,
         file: filePath,
         line,
-        snippet: extractSnippet(content, line),
-        source: rule.source,
-        sink: rule.sink,
-        impact: rule.impact,
-        fix: rule.fix,
-        description: rule.description
+        snippet,
+        source: sourceValue.includes('.') ? sourceValue : `User-controlled value: ${sourceValue}`,
+        sink: callName,
+        impact: `The value from ${sourceValue} reaches ${callName}, which creates a ${sinkType.toLowerCase()} risk in the application.`,
+        fix: getFixRecommendation(sinkType),
+        description: `This is a candidate ${sinkType} instance found via source-to-sink analysis.`,
+        dataFlow: flow
       }));
     }
-  }
+  });
 
-  return findings;
+  return { findings, sources, sinks, dataFlow };
 }
 
-function detectCommandInjection(filePath, content) {
-  const findings = [];
-  const patterns = [
-    {
-      pattern: /(?:exec|execSync|spawn|spawnSync)\s*\(\s*["'`].*?(?:\+|\$\{)/gi,
-      source: 'User input or CLI arguments',
-      sink: 'Operating system command execution',
-      impact: 'An attacker can run arbitrary system commands on the server.',
-      fix: 'Validate input and use safe APIs that avoid shell command execution with untrusted data.',
-      description: 'A shell command is assembled from dynamic input.'
-    }
-  ];
+function getFixRecommendation(type) {
+  const recommendations = {
+    'SQL Injection': 'Use parameterized queries and avoid string concatenation when composing SQL statements.',
+    'Command Injection': 'Validate user input and avoid executing shell commands with untrusted data; use safer APIs or allowlists.',
+    'Path Traversal': 'Normalize and restrict file access to a safe directory and validate user-provided paths before reading or writing files.',
+    'XSS': 'Encode or sanitize output before rendering it in HTML, and prefer safe template rendering or textContent.',
+    'Hardcoded Secret': 'Move credentials to environment variables or a secret manager and never commit them to source code.'
+  };
 
-  for (const rule of patterns) {
-    const regex = new RegExp(rule.pattern);
-    let match;
-
-    while ((match = regex.exec(content)) !== null) {
-      const line = getLineNumber(content, match.index);
-      findings.push(buildFinding({
-        type: 'Command Injection',
-        severity: 'critical',
-        confidence: 'high',
-        file: filePath,
-        line,
-        snippet: extractSnippet(content, line),
-        source: rule.source,
-        sink: rule.sink,
-        impact: rule.impact,
-        fix: rule.fix,
-        description: rule.description
-      }));
-    }
-  }
-
-  return findings;
-}
-
-function detectPathTraversal(filePath, content) {
-  const findings = [];
-  const patterns = [
-    {
-      pattern: /(?:readFileSync|readFile|writeFile|createReadStream|fs\.)\s*\(\s*["'`].*?(?:\+|\$\{)/gi,
-      source: 'User-controlled path or filename',
-      sink: 'File system access',
-      impact: 'Attackers could read or overwrite files outside the intended folder.',
-      fix: 'Validate and normalize the path and restrict access to an allowlisted directory.',
-      description: 'A file operation uses a path derived from dynamic input.'
-    }
-  ];
-
-  for (const rule of patterns) {
-    const regex = new RegExp(rule.pattern);
-    let match;
-
-    while ((match = regex.exec(content)) !== null) {
-      const line = getLineNumber(content, match.index);
-      findings.push(buildFinding({
-        type: 'Path Traversal',
-        severity: 'high',
-        confidence: 'medium',
-        file: filePath,
-        line,
-        snippet: extractSnippet(content, line),
-        source: rule.source,
-        sink: rule.sink,
-        impact: rule.impact,
-        fix: rule.fix,
-        description: rule.description
-      }));
-    }
-  }
-
-  return findings;
-}
-
-function detectHardcodedSecrets(filePath, content) {
-  const findings = [];
-  const patterns = [
-    {
-      pattern: /(?:const|let|var)\s+(?:apiKey|secret|token|password|privateKey)\s*=\s*["'`][^"'`]{8,}["'`]/gi,
-      source: 'Application configuration',
-      sink: 'Credential storage in code',
-      impact: 'Sensitive credentials are exposed in the source tree and can be leaked through repositories or logs.',
-      fix: 'Move secrets to environment variables or a secure vault and never commit them to source control.',
-      description: 'A secret or credential appears directly in the source code.'
-    }
-  ];
-
-  for (const rule of patterns) {
-    const regex = new RegExp(rule.pattern);
-    let match;
-
-    while ((match = regex.exec(content)) !== null) {
-      const line = getLineNumber(content, match.index);
-      findings.push(buildFinding({
-        type: 'Hardcoded Secret',
-        severity: 'medium',
-        confidence: 'high',
-        file: filePath,
-        line,
-        snippet: extractSnippet(content, line),
-        source: rule.source,
-        sink: rule.sink,
-        impact: rule.impact,
-        fix: rule.fix,
-        description: rule.description
-      }));
-    }
-  }
-
-  return findings;
+  return recommendations[type] || 'Validate inputs and isolate unsafe operations behind secure, allowlisted controls.';
 }
 
 function analyzeProject(projectRoot) {
   const files = listFilesRecursively(projectRoot);
   const findings = [];
+  const sources = [];
+  const sinks = [];
+  const dataFlow = [];
 
   for (const filePath of files) {
     const ext = path.extname(filePath).toLowerCase();
-    if (!SUPPORTED_EXTENSIONS.has(ext)) {
-      continue;
-    }
+    if (!SUPPORTED_EXTENSIONS.has(ext)) continue;
 
     const content = fs.readFileSync(filePath, 'utf8');
     const relativePath = path.relative(projectRoot, filePath).replace(/\\/g, '/');
 
-    findings.push(...detectSqlInjection(relativePath, content));
-    findings.push(...detectXss(relativePath, content));
-    findings.push(...detectCommandInjection(relativePath, content));
-    findings.push(...detectPathTraversal(relativePath, content));
-    findings.push(...detectHardcodedSecrets(relativePath, content));
+    const analysis = analyzeFile(relativePath, content);
+    findings.push(...analysis.findings);
+    sources.push(...analysis.sources);
+    sinks.push(...analysis.sinks);
+    dataFlow.push(...analysis.dataFlow);
   }
 
   const deduplicated = findings.filter((item, index, arr) => {
@@ -304,9 +262,7 @@ function analyzeProject(projectRoot) {
     return arr.findIndex(other => `${other.file}:${other.line}:${other.type}:${other.snippet}` === key) === index;
   });
 
-  deduplicated.sort((a, b) => {
-    return (severityOrder[b.severity] || 0) - (severityOrder[a.severity] || 0);
-  });
+  deduplicated.sort((a, b) => (severityOrder[b.severity] || 0) - (severityOrder[a.severity] || 0));
 
   const summary = {
     total: deduplicated.length,
@@ -317,11 +273,22 @@ function analyzeProject(projectRoot) {
     info: deduplicated.filter(item => item.severity === 'info').length
   };
 
+  const pipeline = {
+    sources: [...new Map(sources.map(item => [`${item.file}:${item.variable}`, item])).values()],
+    sinks: [...new Map(sinks.map(item => [`${item.file}:${item.sink}:${item.type}`, item])).values()],
+    dataFlow: [...new Map(dataFlow.map(item => [`${item.file}:${item.variable}:${item.from}`, item])).values()]
+  };
+
   return {
     status: 'success',
     projectRoot,
     summary,
-    findings: deduplicated
+    findings: deduplicated,
+    pipeline,
+    aiSummary: {
+      overview: 'The system parses the project, tracks tainted sources, detects dangerous sinks, validates the path, and generates an explainable security report.',
+      explanation: 'The AI layer explains how untrusted input flows into potentially unsafe operations and recommends secure remediation steps.'
+    }
   };
 }
 

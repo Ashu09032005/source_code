@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Explainable Vulnerability Analyzer</title>
+    <title>Explainable Source-Code Security Analyzer</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -19,15 +19,28 @@
             <input id="zipUpload" type="file" accept=".zip" />
             Upload ZIP
           </label>
+          <button id="downloadReportBtn" class="secondary-btn">Download Report</button>
         </div>
       </header>
 
       <main class="content-grid">
+        <section class="panel pipeline-panel">
+          <h2>Pipeline Overview</h2>
+          <div class="pipeline-grid">
+            <div class="stage-card active"><span>Source Code</span></div>
+            <div class="stage-card active"><span>Code Parser</span></div>
+            <div class="stage-card active"><span>Sources &amp; Sinks</span></div>
+            <div class="stage-card active"><span>Data Flow</span></div>
+            <div class="stage-card active"><span>AI Layer</span></div>
+            <div class="stage-card active"><span>Security Report</span></div>
+          </div>
+        </section>
+
         <section class="panel summary-panel">
           <h2>Project Summary</h2>
           <div id="summaryCards" class="summary-cards">
             <article class="summary-card neutral">
-              <span class="label">Projects</span>
+              <span class="label">Project</span>
               <strong id="projectName">Ready</strong>
             </article>
             <article class="summary-card danger">
@@ -42,6 +55,15 @@
               <span class="label">Total</span>
               <strong id="totalCount">0</strong>
             </article>
+          </div>
+        </section>
+
+        <section id="reportPreview" class="panel report-panel">
+          <div class="section-head">
+            <h2>AI Security Report</h2>
+          </div>
+          <div class="empty-state">
+            No report generated yet. Load a project to view the summary and fix preview.
           </div>
         </section>
 

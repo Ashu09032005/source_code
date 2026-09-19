@@ -17,6 +17,8 @@
   "author": "Ashita",
   "license": "MIT",
   "dependencies": {
+    "@babel/parser": "^8.0.6",
+    "@babel/traverse": "^8.0.6",
     "adm-zip": "^0.6.1",
     "cors": "^2.8.5",
     "express": "^4.21.2",
