@@ -1,0 +1,28 @@
+{
+  "name": "explainable-vuln-analyzer",
+  "version": "1.0.0",
+  "description": "Explainable vulnerability analysis tool for source code using Node.js and Express.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "security",
+    "source-code-analysis",
+    "vulnerability",
+    "express",
+    "node"
+  ],
+  "author": "Ashita",
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.6.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^2.4.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}

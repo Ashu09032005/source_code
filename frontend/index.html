@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Explainable Vulnerability Analyzer</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Security Research Project</p>
+          <h1>Explainable Vulnerability Analyzer</h1>
+        </div>
+        <div class="header-actions">
+          <button id="demoBtn" class="secondary-btn">Load Demo Project</button>
+          <label class="primary-btn upload-label">
+            <input id="zipUpload" type="file" accept=".zip" />
+            Upload ZIP
+          </label>
+        </div>
+      </header>
+
+      <main class="content-grid">
+        <section class="panel summary-panel">
+          <h2>Project Summary</h2>
+          <div id="summaryCards" class="summary-cards">
+            <article class="summary-card neutral">
+              <span class="label">Projects</span>
+              <strong id="projectName">Ready</strong>
+            </article>
+            <article class="summary-card danger">
+              <span class="label">Critical</span>
+              <strong id="criticalCount">0</strong>
+            </article>
+            <article class="summary-card warning">
+              <span class="label">High</span>
+              <strong id="highCount">0</strong>
+            </article>
+            <article class="summary-card info">
+              <span class="label">Total</span>
+              <strong id="totalCount">0</strong>
+            </article>
+          </div>
+        </section>
+
+        <section class="panel findings-panel">
+          <div class="section-head">
+            <h2>Detected Findings</h2>
+            <span id="statusBadge" class="status-badge idle">Idle</span>
+          </div>
+          <div id="findingsList" class="findings-list">
+            <div class="empty-state">
+              Upload a ZIP or load the demo project to begin analysis.
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
